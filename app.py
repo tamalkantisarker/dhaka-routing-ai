@@ -714,29 +714,22 @@ def map_area() -> None:
         st.session_state.scenario_rev, offline, *map_style_args,
         simplify=simplify, _session_id=st.session_state.map_session_id))
     view_pos = st.session_state.view
-    use_static = st.session_state.get("static_map_mode", False)
-    if use_static:
-        try:
-            from streamlit_folium import folium_static
-            trip_layer().add_to(base)
-            folium_static(base, height=map_height)
-        except Exception as exc:
-            st.error(f"Could not render map: {exc}")
-    else:
+    use_interactive = st.session_state.get("interactive_click_mode", False)
+    trip = trip_layer()
+    if use_interactive:
         try:
             from streamlit_folium import st_folium
             st_folium(base, key="main_map", height=map_height, use_container_width=True,
-                      feature_group_to_add=trip_layer(),
+                      feature_group_to_add=trip,
                       center=view_pos[0] if view_pos else None,
                       zoom=view_pos[1] if view_pos else None,
                       returned_objects=["last_clicked"], on_change=map_click_cb)
         except Exception:
-            try:
-                from streamlit_folium import folium_static
-                trip_layer().add_to(base)
-                folium_static(base, height=map_height)
-            except Exception as exc:
-                st.error(f"Could not render map: {exc}")
+            trip.add_to(base)
+            show_html(base.get_root().render(), map_height + 4)
+    else:
+        trip.add_to(base)
+        show_html(base.get_root().render(), map_height + 4)
 
     if st.button("Prepare map for download (HTML)"):
         full = viz.base_map(graph, offline=offline,
@@ -776,8 +769,8 @@ with tab_map:
         st.selectbox("To (destination)", search_options, index=None, key="pick_goal",
                      placeholder="Type to search, e.g. Motijheel",
                      on_change=pick_goal_cb)
-        st.caption("Or click the map: 1st click = start, 2nd = destination, "
-                   "3rd starts a new trip.")
+        st.caption("Select your start and destination above from 4,000+ named places & roads. "
+                   "Turn on 'Interactive map clicks' below if you want to click on the map.")
 
         rc1, rc2 = st.columns(2)
         with rc1:
@@ -858,8 +851,8 @@ with tab_map:
                                          f"({r.nodes_expanded:,} expanded)"))
         st.toggle("Offline map (no tiles)", key="offline_tiles",
                   help="Draw roads without downloading map tiles.")
-        st.toggle("Standard map (safe mode)", key="static_map_mode",
-                  help="Turn on if your browser, adblocker or proxy blocks the interactive st_folium component.")
+        st.toggle("Interactive map clicks (experimental)", key="interactive_click_mode",
+                  help="Uses streamlit-folium for map clicking. Keep off if your browser or network has trouble loading the custom component.")
 
     with left:
         map_area()
