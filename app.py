@@ -580,6 +580,12 @@ def map_area() -> None:
     with top_r:
         view = st.radio("View", [VIEW_MAP, VIEW_SIM, VIEW_PATH, VIEW_COVER], key="map_view",
                         horizontal=True, label_visibility="collapsed")
+
+    found_algos = [name for name in ("A*", "UCS", "GBFS", "BFS", "DFS", "IDS")
+                   if name in st.session_state.results and st.session_state.results[name].found]
+    if len(found_algos) > 1 and view == VIEW_MAP:
+        st.radio("Highlight route on map", ["All algorithms", *found_algos],
+                 horizontal=True, key="focus_map_algo")
     if st.session_state.map_note:
         st.caption("⚠️ " + st.session_state.map_note)
 
@@ -587,22 +593,65 @@ def map_area() -> None:
 
     def trip_layer() -> "folium.FeatureGroup":
         fg = folium.FeatureGroup(name="trip")
+        focus_algo = st.session_state.get("focus_map_algo", "All algorithms")
+
+        # Draw previous route(s) (before road edit)
         if st.session_state.get("show_previous_route", True):
-            for old in st.session_state.get("previous_routes", {}).values():
-                if old.found:
+            for old_name, old in st.session_state.get("previous_routes", {}).items():
+                if old.found and (focus_algo == "All algorithms" or focus_algo == old_name):
                     coords = [coord for edge in old.edge_path for coord in edge.geometry]
-                    folium.PolyLine(coords, color="#666666", weight=5,
-                                    opacity=0.65, dash_array="8 6",
+                    folium.PolyLine(coords, color="#64748b", weight=6,
+                                    opacity=0.75, dash_array="8 6",
+                                    tooltip=f"⏮️ Previous {old_name} route (before edit)",
                                     interactive=False).add_to(fg)
+
+        # Draw current active route(s) (after road edit)
         for name, res in st.session_state.results.items():
             if res.found:
-                viz.add_route(fg, res.edge_path,
-                              color=viz.ROUTE_COLORS.get(name, "#333"), weight=5)
+                if focus_algo == "All algorithms":
+                    viz.add_route(fg, res.edge_path,
+                                  color=viz.ROUTE_COLORS.get(name, "#333"), weight=5)
+                elif focus_algo == name:
+                    viz.add_route(fg, res.edge_path,
+                                  color=viz.ROUTE_COLORS.get(name, "#2563eb"), weight=7)
+
+        # Draw edited / blocked roads with high visibility hazard styling & markers
         edited_ids = {eid for edit in st.session_state.local_edits for eid in edit["eids"]}
         for eid in edited_ids:
             if eid in graph.edges:
-                folium.PolyLine(graph.edges[eid].geometry, color="#c225c2", weight=7,
-                                opacity=0.8, dash_array="3 7", interactive=False).add_to(fg)
+                edge = graph.edges[eid]
+                attr = sc.get(eid)
+                geom = edge.geometry
+                mid_pt = geom[len(geom) // 2]
+                if attr.closed:
+                    # High-visibility black & red hazard barrier
+                    folium.PolyLine(geom, color="#000000", weight=11, opacity=0.9, interactive=False).add_to(fg)
+                    folium.PolyLine(geom, color="#ef4444", weight=6, opacity=1.0, dash_array="6 6", interactive=False).add_to(fg)
+                    folium.Marker(
+                        mid_pt,
+                        icon=folium.Icon(color="red", icon="ban", prefix="fa"),
+                        tooltip=f"⛔ ROAD CLOSED: {edge.name}",
+                        popup=f"<b>⛔ ROAD CLOSED / BLOCKED</b><br>{edge.name}<br>Length: {edge.length_km*1000:.0f} m",
+                    ).add_to(fg)
+                elif attr.incident:
+                    inc_color = "#0284c7" if attr.incident == "flood" else "#ea580c"
+                    icon_name = "tint" if attr.incident == "flood" else "warning"
+                    folium.PolyLine(geom, color=inc_color, weight=8, opacity=0.9, interactive=False).add_to(fg)
+                    folium.Marker(
+                        mid_pt,
+                        icon=folium.Icon(color="orange" if attr.incident != "flood" else "blue", icon=icon_name, prefix="fa"),
+                        tooltip=f"⚠️ {attr.incident.title()}: {edge.name}",
+                        popup=f"<b>⚠️ {attr.incident.title()}</b><br>{edge.name}",
+                    ).add_to(fg)
+                else:
+                    color = "#b91c1c" if attr.traffic >= 4.0 else "#c225c2"
+                    folium.PolyLine(geom, color=color, weight=7, opacity=0.85, dash_array="4 6", interactive=False).add_to(fg)
+                    folium.Marker(
+                        mid_pt,
+                        icon=folium.Icon(color="darkred" if attr.traffic >= 4.0 else "purple", icon="tachometer", prefix="fa"),
+                        tooltip=f"Edited road: {edge.name} (Traffic: {attr.traffic:.1f}, Cond: {attr.condition:.1f})",
+                    ).add_to(fg)
+
         if st.session_state.start is not None:
             folium.Marker(graph.coord(st.session_state.start),
                           icon=folium.Icon(color="green", icon="play")).add_to(fg)
@@ -927,7 +976,70 @@ with tab_edit:
 
     comparison = st.session_state.get("replan_comparison")
     if comparison:
-        st.markdown("**Before / after the last road edit**")
+        st.markdown("### 📊 Re-routing Impact & Map Comparison")
+        comp_algos = [row["algorithm"] for row in comparison if row.get("before_status") == "found"]
+        if comp_algos:
+            sel_algo = st.selectbox("Inspect Before/After detour for algorithm", comp_algos, key="comp_algo_select")
+            row = next((r for r in comparison if r["algorithm"] == sel_algo), None)
+            if row:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Path Result", "🔄 Detour Taken" if row["path_changed"] else "✅ Route Unchanged")
+                m2.metric("Distance", f"{row['after_km']:.2f} km" if row['after_km'] else "Blocked",
+                          delta=f"{(row['after_km'] - row['before_km']):+.2f} km" if row['after_km'] and row['before_km'] else None)
+                m3.metric("Old Cost", f"{row['previous_cost']:.2f}" if row['previous_cost'] is not None else "N/A")
+                m4.metric("New Cost", f"{row['new_path_cost']:.2f}" if row['new_path_cost'] is not None else "∞ (Blocked)",
+                          delta=f"{(row['new_path_cost'] - row['previous_cost']):+.2f}" if row['new_path_cost'] and row['previous_cost'] else None,
+                          delta_color="inverse")
+
+            # Dedicated visual comparison map right here in Edit roads
+            import folium
+            comp_map = viz.base_map(graph, offline=offline, zoom=13 if network == REGION else 12)
+            cfg_trip = folium.FeatureGroup(name="comp_trip")
+
+            # 1. Old route before edit in grey dashed
+            old_res = st.session_state.previous_routes.get(sel_algo)
+            if old_res and old_res.found:
+                coords = [coord for edge in old_res.edge_path for coord in edge.geometry]
+                folium.PolyLine(coords, color="#64748b", weight=6, opacity=0.75,
+                                dash_array="8 6", tooltip=f"⏮️ {sel_algo} Original Route (Before Edit)").add_to(cfg_trip)
+
+            # 2. New route after edit in bright blue
+            new_res = st.session_state.results.get(sel_algo)
+            if new_res and new_res.found:
+                coords = [coord for edge in new_res.edge_path for coord in edge.geometry]
+                folium.PolyLine(coords, color="#2563eb", weight=6, opacity=0.9,
+                                tooltip=f"⏭️ {sel_algo} New Detour Route (After Edit)").add_to(cfg_trip)
+
+            # 3. Highlight the blocked road in bold hazard barrier style with ⛔ marker
+            edited_ids = {eid for edit in st.session_state.local_edits for eid in edit["eids"]}
+            for eid in edited_ids:
+                if eid in graph.edges:
+                    edge = graph.edges[eid]
+                    attr = sc.get(eid)
+                    geom = edge.geometry
+                    mid_pt = geom[len(geom) // 2]
+                    if attr.closed:
+                        folium.PolyLine(geom, color="#000000", weight=11, opacity=0.9).add_to(cfg_trip)
+                        folium.PolyLine(geom, color="#ef4444", weight=6, opacity=1.0, dash_array="6 6").add_to(cfg_trip)
+                        folium.Marker(mid_pt, icon=folium.Icon(color="red", icon="ban", prefix="fa"),
+                                      tooltip=f"⛔ ROAD BLOCKED: {edge.name}").add_to(cfg_trip)
+                    else:
+                        folium.PolyLine(geom, color="#ea580c", weight=8, opacity=0.9).add_to(cfg_trip)
+                        folium.Marker(mid_pt, icon=folium.Icon(color="orange", icon="warning", prefix="fa"),
+                                      tooltip=f"⚠️ Edited Road: {edge.name}").add_to(cfg_trip)
+
+            if st.session_state.start is not None:
+                folium.Marker(graph.coord(st.session_state.start),
+                              icon=folium.Icon(color="green", icon="play")).add_to(cfg_trip)
+            if st.session_state.goal is not None:
+                folium.Marker(graph.coord(st.session_state.goal),
+                              icon=folium.Icon(color="red", icon="flag")).add_to(cfg_trip)
+
+            cfg_trip.add_to(comp_map)
+            show_html(comp_map.get_root().render(), 380)
+            st.caption("Map Legend: ⚪ Grey Dashed = Original Route (Before) | 🔵 Blue Solid = New Rerouted Path (After) | ⛔ Red = Blockage")
+
+        st.markdown("**Complete Multi-Algorithm Impact Table**")
         st.dataframe(pd.DataFrame(comparison), width="stretch", hide_index=True)
         st.caption("Compare old_path_at_new_cost with new_path_cost: both use the new "
                    "road values. An infinite old-path cost means that route is now blocked. "
