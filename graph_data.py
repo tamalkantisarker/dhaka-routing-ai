@@ -729,6 +729,30 @@ def load_graph(cfg: "config.AppConfig", use_cache: bool = True,
             if verbose:
                 print(f"[graph] cache unreadable ({exc}); rebuilding")
 
+    # Fast path for bundled extract: check for a prebuilt serialized graph in data/
+    bundled_gz = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data",
+        f"dhaka_graph_v{GRAPH_FORMAT_VERSION}.pkl.gz",
+    )
+    if use_cache and cfg.simplify and cfg.use_largest_component and os.path.exists(bundled_gz):
+        if os.path.basename(cfg.osm_file).lower() == os.path.basename(config.BUNDLED_OSM_FILE).lower():
+            try:
+                import gzip
+                with gzip.open(bundled_gz, "rb") as fh:
+                    g = pickle.load(fh)
+                if verbose:
+                    print(f"[graph] loaded from bundled prebuilt cache: {bundled_gz}")
+                try:
+                    with open(cache_path, "wb") as cfh:
+                        pickle.dump(g, cfh, protocol=pickle.HIGHEST_PROTOCOL)
+                except Exception:
+                    pass
+                return g
+            except Exception as exc:  # noqa: BLE001
+                if verbose:
+                    print(f"[graph] bundled prebuilt cache unreadable ({exc}); rebuilding")
+
     g = build_graph(cfg.osm_file, simplify=cfg.simplify,
                     use_largest_component=cfg.use_largest_component, verbose=verbose)
     if use_cache:

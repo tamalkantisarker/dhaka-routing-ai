@@ -95,6 +95,23 @@ def get_region_graph(osm_file: str, simplify: bool) -> RoadGraph:
 def get_indexes(osm_file: str, simplify: bool, network: str):
     g = (get_region_graph(osm_file, simplify) if network == REGION
          else get_full_graph(osm_file, simplify))
+
+    # Fast path for bundled full network: load prebuilt place & junction indices
+    if network != REGION and simplify and os.path.basename(osm_file).lower() == os.path.basename(config.BUNDLED_OSM_FILE).lower():
+        from graph_data import GRAPH_FORMAT_VERSION
+        import gzip
+        bundled_idx = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "data",
+            f"dhaka_indices_v{GRAPH_FORMAT_VERSION}.pkl.gz",
+        )
+        if os.path.exists(bundled_idx):
+            try:
+                with gzip.open(bundled_idx, "rb") as fh:
+                    p_idx, j_idx = pickle.load(fh)
+                return NodeIndex(g), p_idx, j_idx
+            except Exception:
+                pass
     return NodeIndex(g), place_index(g), junction_index(g)
 
 
@@ -122,8 +139,8 @@ REGION = "Central demo region (small)"
 def get_base_map_blob(_graph: RoadGraph, _scenario: Scenario, osm_file: str,
                       network: str, scenario_name: str, rev: int,
                       offline: bool, color_mode: str, weights: tuple,
-                      night: bool, limits: tuple, session_id: str,
-                      simplify: bool) -> bytes:
+                      night: bool, limits: tuple, simplify: bool,
+                      _session_id: str = "") -> bytes:
     """
     The road layer, drawn once and cached as pickled bytes.  Only the arguments
     without a leading underscore form the cache key; ``rev`` changes whenever
@@ -694,7 +711,7 @@ def map_area() -> None:
     base = load_base_map(get_base_map_blob(
         graph, sc, osm_file, network, scenario_name,
         st.session_state.scenario_rev, offline, *map_style_args,
-        st.session_state.map_session_id, simplify))
+        simplify=simplify, _session_id=st.session_state.map_session_id))
     view_pos = st.session_state.view
     try:
         from streamlit_folium import st_folium
@@ -731,10 +748,18 @@ with tab_map:
         # A map click or swap clears the boxes so they never show a stale choice.
         for key in st.session_state.pop("clear_picks", ()):
             st.session_state[key] = None
-        st.selectbox("From (start)", list(places), index=None, key="pick_start",
+        if network == REGION:
+            search_options = list(places)
+        else:
+            search_options = list(named_places)
+            for p in (st.session_state.get("start_label"), st.session_state.get("goal_label")):
+                if p and p in places and p not in named_places:
+                    search_options.append(p)
+
+        st.selectbox("From (start)", search_options, index=None, key="pick_start",
                      placeholder="Type to search, e.g. Dhaka University",
                      on_change=pick_start_cb)
-        st.selectbox("To (destination)", list(places), index=None, key="pick_goal",
+        st.selectbox("To (destination)", search_options, index=None, key="pick_goal",
                      placeholder="Type to search, e.g. Motijheel",
                      on_change=pick_goal_cb)
         st.caption("Or click the map: 1st click = start, 2nd = destination, "

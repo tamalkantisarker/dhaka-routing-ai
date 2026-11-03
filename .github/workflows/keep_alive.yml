@@ -1,0 +1,15 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    # Run every 10 minutes to prevent Streamlit Community Cloud hibernation
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit Health Endpoint
+        run: |
+          curl -s -f -m 20 https://dhaka-routing-ai-tamal.streamlit.app/~/+/_stcore/health || echo "Ping attempted"
