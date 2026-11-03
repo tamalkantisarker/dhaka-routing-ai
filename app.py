@@ -600,8 +600,9 @@ def map_area() -> None:
                               color=viz.ROUTE_COLORS.get(name, "#333"), weight=5)
         edited_ids = {eid for edit in st.session_state.local_edits for eid in edit["eids"]}
         for eid in edited_ids:
-            folium.PolyLine(graph.edges[eid].geometry, color="#c225c2", weight=7,
-                            opacity=0.8, dash_array="3 7", interactive=False).add_to(fg)
+            if eid in graph.edges:
+                folium.PolyLine(graph.edges[eid].geometry, color="#c225c2", weight=7,
+                                opacity=0.8, dash_array="3 7", interactive=False).add_to(fg)
         if st.session_state.start is not None:
             folium.Marker(graph.coord(st.session_state.start),
                           icon=folium.Icon(color="green", icon="play")).add_to(fg)
@@ -713,16 +714,29 @@ def map_area() -> None:
         st.session_state.scenario_rev, offline, *map_style_args,
         simplify=simplify, _session_id=st.session_state.map_session_id))
     view_pos = st.session_state.view
-    try:
-        from streamlit_folium import st_folium
-    except Exception:  # noqa: BLE001
-        st.info("Install `streamlit-folium` for an interactive map.")
-        return
-    st_folium(base, key="main_map", height=map_height, use_container_width=True,
-              feature_group_to_add=trip_layer(),
-              center=view_pos[0] if view_pos else None,
-              zoom=view_pos[1] if view_pos else None,
-              returned_objects=["last_clicked"], on_change=map_click_cb)
+    use_static = st.session_state.get("static_map_mode", False)
+    if use_static:
+        try:
+            from streamlit_folium import folium_static
+            trip_layer().add_to(base)
+            folium_static(base, height=map_height)
+        except Exception as exc:
+            st.error(f"Could not render map: {exc}")
+    else:
+        try:
+            from streamlit_folium import st_folium
+            st_folium(base, key="main_map", height=map_height, use_container_width=True,
+                      feature_group_to_add=trip_layer(),
+                      center=view_pos[0] if view_pos else None,
+                      zoom=view_pos[1] if view_pos else None,
+                      returned_objects=["last_clicked"], on_change=map_click_cb)
+        except Exception:
+            try:
+                from streamlit_folium import folium_static
+                trip_layer().add_to(base)
+                folium_static(base, height=map_height)
+            except Exception as exc:
+                st.error(f"Could not render map: {exc}")
 
     if st.button("Prepare map for download (HTML)"):
         full = viz.base_map(graph, offline=offline,
@@ -844,6 +858,8 @@ with tab_map:
                                          f"({r.nodes_expanded:,} expanded)"))
         st.toggle("Offline map (no tiles)", key="offline_tiles",
                   help="Draw roads without downloading map tiles.")
+        st.toggle("Standard map (safe mode)", key="static_map_mode",
+                  help="Turn on if your browser, adblocker or proxy blocks the interactive st_folium component.")
 
     with left:
         map_area()
@@ -927,12 +943,13 @@ with tab_edit:
     current = st.session_state.results
     reference = st.session_state.get("edit_reference")
     trip_sig = (osm_file, network, st.session_state.start, st.session_state.goal)
-    if reference and reference["trip"] != trip_sig:
+    if reference and reference.get("trip") != trip_sig:
         reference = None
         st.session_state.edit_reference = None
     available = [name for name in ALGORITHMS if name in current and current[name].found]
-    if reference and reference["algorithm"] not in available:
+    if reference and reference.get("algorithm") not in available:
         available.append(reference["algorithm"])
+    edit_algorithm = reference.get("algorithm") if reference else st.session_state.get("edit_algorithm", "A*")
     candidate_edges = []
     if available:
         if st.session_state.get("edit_algorithm") not in available:
@@ -940,7 +957,7 @@ with tab_edit:
         edit_algorithm = st.selectbox("Edit the path of algorithm", available,
                                       key="edit_algorithm")
         latest = current.get(edit_algorithm)
-        if reference is None or reference["algorithm"] != edit_algorithm:
+        if reference is None or reference.get("algorithm") != edit_algorithm:
             if latest and latest.found:
                 reference = {"trip": trip_sig, "algorithm": edit_algorithm,
                              "eids": [e.eid for e in latest.edge_path]}
@@ -952,9 +969,11 @@ with tab_edit:
                 "eids": [e.eid for e in latest.edge_path]}
             st.rerun()
         if reference:
-            candidate_edges = [graph.edges[eid] for eid in reference["eids"]]
+            candidate_edges = [graph.edges[eid] for eid in reference.get("eids", []) if eid in graph.edges]
         st.caption("The selected path stays available after rerouting, so you can change "
                    "or restore the same road. Use the button above to select the latest path.")
+    elif reference:
+        candidate_edges = [graph.edges[eid] for eid in reference.get("eids", []) if eid in graph.edges]
 
     source = st.radio("Pick edge from", ["Part of current route", "Current route",
                                          "Search by road name"], horizontal=True)
