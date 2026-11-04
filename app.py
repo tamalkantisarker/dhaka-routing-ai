@@ -472,8 +472,9 @@ def commit_road_edits(edits, message: str) -> None:
     st.session_state.scenario_rev += 1
     st.session_state.results = {}
     st.session_state.previous_routes = before
+    st.session_state.pending_view = VIEW_MAP
     if st.session_state.start is not None and st.session_state.goal is not None:
-        names = list(before) or algo_choice or ["A*"]
+        names = list(before) or st.session_state.get("algo_choice") or ["UCS", "A*", "GBFS"]
         run_selected(names)
     st.session_state.replan_comparison = compare_routes(
         before, st.session_state.results, sc, cfg.weights, night)
@@ -492,7 +493,45 @@ if "reset_before" in st.session_state:
 
 
 def show_html(page: str, height: int) -> None:
-    """Embed a self-contained page we generated (never user-supplied HTML)."""
+    """Embed a self-contained page with automatic Leaflet container resizing."""
+    auto_resize_script = """
+<script>
+(function() {
+    function fixLeaflet() {
+        for (var key in window) {
+            try {
+                if (window[key] && typeof window[key].invalidateSize === 'function') {
+                    window[key].invalidateSize();
+                }
+            } catch(e) {}
+        }
+    }
+    window.addEventListener('resize', fixLeaflet);
+    window.addEventListener('focus', fixLeaflet);
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) fixLeaflet();
+    });
+    if (window.ResizeObserver) {
+        var ro = new ResizeObserver(function() { fixLeaflet(); });
+        if (document.body) ro.observe(document.body);
+        if (document.documentElement) ro.observe(document.documentElement);
+    }
+    var count = 0;
+    var timer = setInterval(function() {
+        fixLeaflet();
+        count++;
+        if (count > 25) clearInterval(timer);
+    }, 200);
+})();
+</script>
+"""
+    if "</body>" in page:
+        page = page.replace("</body>", auto_resize_script + "</body>", 1)
+    elif "</html>" in page:
+        page = page.replace("</html>", auto_resize_script + "</html>", 1)
+    else:
+        page = page + auto_resize_script
+
     if hasattr(st, "iframe"):                 # st.components.v1.html is being removed
         st.iframe(page, height=height)
     else:
@@ -586,6 +625,10 @@ def map_area() -> None:
     if len(found_algos) > 1 and view == VIEW_MAP:
         st.radio("Highlight route on map", ["All algorithms", *found_algos],
                  horizontal=True, key="focus_map_algo")
+    res_dict = st.session_state.results
+    if res_dict and not any(r.found for r in res_dict.values()):
+        st.error("⛔ **Destination Unreachable:** All search algorithms failed to find an alternative route because roads leading to the destination are closed/blocked. "
+                 "Go to **🛠️ Edit roads** to remove or reduce the blockage so a detour can be found.")
     if st.session_state.map_note:
         st.caption("⚠️ " + st.session_state.map_note)
 
@@ -696,8 +739,15 @@ def map_area() -> None:
     if view == VIEW_PATH:
         found = [n for n in simulation.ALGO_ORDER if n in results and results[n].found]
         if not found:
-            st.info("Run an algorithm that finds a path; its route will be listed "
-                    "here node by node.")
+            if results:
+                st.error("⛔ **No route found:** The destination is currently unreachable under current road closure(s).")
+                st.info("💡 **Why this happened:** The road edit or closure completely blocked the only connected path to the destination. "
+                        "Go to **🛠️ Edit roads** and click **Remove** on the closure or edit fewer segments to allow an alternative detour.")
+                for name, res in results.items():
+                    st.caption(f"• **{name}**: ⚠️ {res.status.value} ({res.nodes_expanded:,} nodes explored)")
+            else:
+                st.info("Run an algorithm that finds a path; its route will be listed "
+                        "here node by node.")
             return
         if st.session_state.get("path_algo") not in found:
             st.session_state.path_algo = found[-1]          # A* if it was run
@@ -829,7 +879,7 @@ with tab_map:
             all_clicked = st.button("⚖ All six", width="stretch",
                                     help="Run all six algorithms")
         algo_choice = st.multiselect("Algorithms", list(ALGORITHMS.keys()),
-                                     default=["UCS", "A*", "GBFS"])
+                                     default=["UCS", "A*", "GBFS"], key="algo_choice")
         auto_on = st.checkbox("Auto-run", value=True,
                               help="Run the selected algorithms as soon as both points are set.")
 
@@ -1095,8 +1145,11 @@ with tab_edit:
             part = candidate_edges
             lo = hi = 0
         else:
+            mid = len(marks) // 2
+            default_range = (marks[mid], marks[mid])
+            st.caption("💡 **Tip:** By default, 1 road segment in the middle is selected so search algorithms can find a detour around it. Drag the handles to expand the range.")
             low, high = st.select_slider("Part of the route to change (start to destination)",
-                                        options=marks, value=(marks[0], marks[-1]), key=route_key)
+                                        options=marks, value=default_range, key=route_key)
             lo, hi = marks.index(low), marks.index(high)
             part = candidate_edges[lo:hi + 1]
         label = f"{edit_algorithm}: segments {lo + 1} to {hi + 1}"
