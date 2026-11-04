@@ -1029,7 +1029,8 @@ with tab_edit:
         st.markdown("### 📊 Re-routing Impact & Map Comparison")
         comp_algos = [row["algorithm"] for row in comparison if row.get("before_status") == "found"]
         if comp_algos:
-            sel_algo = st.selectbox("Inspect Before/After detour for algorithm", comp_algos, key="comp_algo_select")
+            sel_options = ["All algorithms", *comp_algos] if len(comp_algos) > 1 else comp_algos
+            sel_algo = st.selectbox("Inspect Before/After detour on map", sel_options, key="comp_algo_select")
             row = next((r for r in comparison if r["algorithm"] == sel_algo), None)
             if row:
                 m1, m2, m3, m4 = st.columns(4)
@@ -1040,25 +1041,42 @@ with tab_edit:
                 m4.metric("New Cost", f"{row['new_path_cost']:.2f}" if row['new_path_cost'] is not None else "∞ (Blocked)",
                           delta=f"{(row['new_path_cost'] - row['previous_cost']):+.2f}" if row['new_path_cost'] and row['previous_cost'] else None,
                           delta_color="inverse")
+            elif sel_algo == "All algorithms":
+                detours = sum(1 for r in comparison if r.get("path_changed"))
+                st.info(f"Showing all algorithms together on the map: **{detours}** algorithm(s) took an alternative detour around the blockage.")
 
             # Dedicated visual comparison map right here in Edit roads
             import folium
             comp_map = viz.base_map(graph, offline=offline, zoom=13 if network == REGION else 12)
             cfg_trip = folium.FeatureGroup(name="comp_trip")
 
-            # 1. Old route before edit in grey dashed
-            old_res = st.session_state.previous_routes.get(sel_algo)
-            if old_res and old_res.found:
-                coords = [coord for edge in old_res.edge_path for coord in edge.geometry]
-                folium.PolyLine(coords, color="#64748b", weight=6, opacity=0.75,
-                                dash_array="8 6", tooltip=f"⏮️ {sel_algo} Original Route (Before Edit)").add_to(cfg_trip)
+            if sel_algo == "All algorithms":
+                # Draw all old routes in grey dashed
+                for old_name, old_res in st.session_state.previous_routes.items():
+                    if old_res and old_res.found:
+                        coords = [coord for edge in old_res.edge_path for coord in edge.geometry]
+                        folium.PolyLine(coords, color="#64748b", weight=5, opacity=0.6,
+                                        dash_array="8 6", tooltip=f"⏮️ {old_name} Before Edit").add_to(cfg_trip)
+                # Draw all new routes in distinct algorithm colors
+                for name, new_res in st.session_state.results.items():
+                    if new_res and new_res.found:
+                        coords = [coord for edge in new_res.edge_path for coord in edge.geometry]
+                        folium.PolyLine(coords, color=viz.ROUTE_COLORS.get(name, "#2563eb"), weight=6, opacity=0.85,
+                                        tooltip=f"⏭️ {name} New Detour Route").add_to(cfg_trip)
+            else:
+                # 1. Old route before edit in grey dashed
+                old_res = st.session_state.previous_routes.get(sel_algo)
+                if old_res and old_res.found:
+                    coords = [coord for edge in old_res.edge_path for coord in edge.geometry]
+                    folium.PolyLine(coords, color="#64748b", weight=6, opacity=0.75,
+                                    dash_array="8 6", tooltip=f"⏮️ {sel_algo} Original Route (Before Edit)").add_to(cfg_trip)
 
-            # 2. New route after edit in bright blue
-            new_res = st.session_state.results.get(sel_algo)
-            if new_res and new_res.found:
-                coords = [coord for edge in new_res.edge_path for coord in edge.geometry]
-                folium.PolyLine(coords, color="#2563eb", weight=6, opacity=0.9,
-                                tooltip=f"⏭️ {sel_algo} New Detour Route (After Edit)").add_to(cfg_trip)
+                # 2. New route after edit in bright blue
+                new_res = st.session_state.results.get(sel_algo)
+                if new_res and new_res.found:
+                    coords = [coord for edge in new_res.edge_path for coord in edge.geometry]
+                    folium.PolyLine(coords, color="#2563eb", weight=6, opacity=0.9,
+                                    tooltip=f"⏭️ {sel_algo} New Detour Route (After Edit)").add_to(cfg_trip)
 
             # 3. Highlight the blocked road in bold hazard barrier style with ⛔ marker
             edited_ids = {eid for edit in st.session_state.local_edits for eid in edit["eids"]}
